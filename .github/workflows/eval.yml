@@ -1,0 +1,177 @@
+name: PR eval (main vs. fix)
+
+# Runs eval.py against the PR's dataset twice per PR — once on main, once on
+# the PR branch — so an Engine-generated fix can be scored against the
+# still-buggy baseline without an attendee touching their laptop.
+#
+# `pull_request` (not `pull_request_target`) is intentional: it means fork PRs
+# do NOT get access to the upstream repo's secrets, so the attendee has to
+# put LANGSMITH_API_KEY + OPENAI_API_KEY + DATASET_NAME as secrets on their
+# own fork. That is exactly the workshop model — everyone evaluates against
+# their own workspace.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# Cancel any prior in-flight eval for this PR when a new commit lands. Two
+# runs of eval.py against the same experiment name would 409; cancelling the
+# older one avoids that and saves LangSmith usage.
+concurrency:
+  group: pr-eval-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # Fast preflight so a missing secret doesn't burn ~2 minutes of matrix
+  # setup before failing. Also posts a comment telling the attendee exactly
+  # which secret is missing — CI logs are opaque to non-devs.
+  check-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        uses: actions/github-script@v7
+        env:
+          HAS_LANGSMITH: ${{ secrets.LANGSMITH_API_KEY != '' }}
+          HAS_OPENAI: ${{ secrets.OPENAI_API_KEY != '' }}
+          HAS_DATASET: ${{ secrets.DATASET_NAME != '' }}
+        with:
+          script: |
+            const missing = [];
+            if (process.env.HAS_LANGSMITH !== 'true') missing.push('LANGSMITH_API_KEY');
+            if (process.env.HAS_OPENAI !== 'true')    missing.push('OPENAI_API_KEY');
+            if (process.env.HAS_DATASET !== 'true')   missing.push('DATASET_NAME');
+
+            if (missing.length === 0) {
+              core.setOutput('ready', 'true');
+              return;
+            }
+            core.setOutput('ready', 'false');
+
+            const body = [
+              '⚠️ **PR eval skipped — missing repo secrets.**',
+              '',
+              `Add the following secret${missing.length === 1 ? '' : 's'} in **Settings → Secrets and variables → Actions** on this fork, then use **Re-run failed jobs** on the Actions run:`,
+              '',
+              ...missing.map(m => `- \`${m}\``),
+              '',
+              'Once set, the workflow will run `eval.py` against `main` and this PR branch and post the LangSmith experiment links here.',
+            ].join('\n');
+
+            if (context.eventName === 'pull_request') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+            // Fail the job so the PR shows a red check and the "Re-run
+            // failed jobs" button is enabled — one click replay after the
+            // attendee adds the missing secret(s).
+            core.setFailed(`Missing secret${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`);
+
+  eval:
+    needs: check-secrets
+    if: needs.check-secrets.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      # Don't abort the "fix" run just because "main" fails, and vice versa.
+      # The whole point is comparing the two — even a broken side is signal.
+      fail-fast: false
+      matrix:
+        include:
+          - side: main
+            ref:  ${{ github.event.pull_request.base.sha }}
+          - side: fix
+            ref:  ${{ github.event.pull_request.head.sha }}
+    outputs:
+      main_experiment: ${{ steps.collect.outputs.main_experiment }}
+      fix_experiment:  ${{ steps.collect.outputs.fix_experiment }}
+    steps:
+      - name: Checkout ${{ matrix.side }} (${{ matrix.ref }})
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Sync deps
+        working-directory: gtm-agent-engine-workshop
+        run: uv sync --frozen
+
+      - name: Run eval on ${{ matrix.side }}
+        id: run
+        working-directory: gtm-agent-engine-workshop
+        env:
+          LANGSMITH_API_KEY:    ${{ secrets.LANGSMITH_API_KEY }}
+          OPENAI_API_KEY:       ${{ secrets.OPENAI_API_KEY }}
+          DATASET_NAME:         ${{ secrets.DATASET_NAME }}
+          LANGSMITH_WORKSPACE_ID: ${{ secrets.LANGSMITH_WORKSPACE_ID }}
+          LANGSMITH_ENDPOINT:   ${{ secrets.LANGSMITH_ENDPOINT }}
+          LANGSMITH_PROJECT:    ${{ secrets.LANGSMITH_PROJECT }}
+          LANGSMITH_TRACING:    "true"
+          # Distinct prefix per side so the two experiments live side-by-side
+          # in LangSmith rather than clobbering each other.
+          EXPERIMENT_PREFIX:    pr-${{ github.event.pull_request.number }}-${{ matrix.side }}
+        run: |
+          set -euo pipefail
+          # eval.py writes its experiment_name to stdout after evaluate()
+          # returns; capture it and stash into GITHUB_OUTPUT for the summary.
+          uv run python eval.py | tee eval.out
+          name=$(grep -E '^experiment_name=' eval.out | tail -1 | cut -d= -f2-)
+          echo "experiment_name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Collect experiment name
+        id: collect
+        env:
+          NAME: ${{ steps.run.outputs.experiment_name }}
+        run: |
+          echo "${{ matrix.side }}_experiment=${NAME}" >> "$GITHUB_OUTPUT"
+
+  # Single comment summarising both sides. Runs even if one matrix leg
+  # failed so a partial result still lands on the PR.
+  comment:
+    needs: eval
+    if: always() && needs.eval.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          MAIN_EXP: ${{ needs.eval.outputs.main_experiment }}
+          FIX_EXP:  ${{ needs.eval.outputs.fix_experiment }}
+          RESULT:   ${{ needs.eval.result }}
+        with:
+          script: |
+            const main = process.env.MAIN_EXP || '(not produced)';
+            const fix  = process.env.FIX_EXP  || '(not produced)';
+            const status = process.env.RESULT === 'success'
+              ? '✅ eval finished'
+              : '⚠️ eval finished with failures — check the Actions logs';
+
+            const lines = [
+              `## ${status}`,
+              '',
+              '| side | experiment |',
+              '|------|------------|',
+              `| \`main\` | \`${main}\` |`,
+              `| \`fix\`  | \`${fix}\`  |`,
+              '',
+              'Open both experiments in LangSmith and use the **Compare** view to see the delta on `assertions_passed`.',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+              body: lines,
+            });

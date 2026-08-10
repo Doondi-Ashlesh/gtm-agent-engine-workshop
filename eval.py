@@ -20,11 +20,17 @@ def main() -> None:
     # Hard-fails if DATASET_NAME is not set.
     dataset = os.environ["DATASET_NAME"]
 
-    evaluate(
+    # EXPERIMENT_PREFIX lets the PR-eval workflow name the two sides
+    # distinctly (pr-<n>-main vs pr-<n>-fix); local runs default to "baseline".
+    prefix = os.environ.get("EXPERIMENT_PREFIX", "baseline")
+
+    results = evaluate(
         evaluation_target,
         data=dataset,
-        experiment_prefix="baseline",
+        experiment_prefix=prefix,
     )
+    # Print in a shape the workflow can grep to build the PR comment.
+    print(f"experiment_name={results.experiment_name}")
 
 
 if __name__ == "__main__":
