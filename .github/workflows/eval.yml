@@ -12,7 +12,6 @@ name: PR eval (main vs. fix)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
 
 # Cancel any prior in-flight eval for this PR when a new commit lands. Two
 # runs of eval.py against the same experiment name would 409; cancelling the
