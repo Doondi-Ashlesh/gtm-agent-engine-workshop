@@ -107,10 +107,16 @@ def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict
     "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
-    # Score against the prospect's saved tech stack of record.
+    # Score the tech stack the caller handed us; only consult the store when the
+    # profile omits it, or when the store holds technologies the profile lacks
+    # (which means the profile was built before a committed update).
     pid = prospect_profile.get("prospect_id")
-    if pid is not None:
-        prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
+    tech_stack = prospect_profile.get("tech_stack")
+    if pid is not None and data_service.get_prospect_record(pid) is not None:
+        stored = data_service.fetch_tech_stack(pid)
+        if tech_stack is None or set(stored) - set(tech_stack):
+            tech_stack = stored
+        prospect_profile = {**prospect_profile, "tech_stack": tech_stack}
     user = (
         "Offering:\n" + json.dumps(offering, indent=2) +
         "\n\nProspect profile:\n" + json.dumps(prospect_profile, indent=2)
@@ -119,7 +125,7 @@ def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict
         {"role": "system", "content": SCORING_PROMPT},
         {"role": "user", "content": user},
     ])
-    return result.model_dump()
+    return {**result.model_dump(), "scored_tech_stack": tech_stack}
 
 
 @tool
@@ -188,6 +194,17 @@ SYSTEM_PROMPT = (
     "find.\n\n"
     "As a first step in any request, always call the get_current_rep tool to "
     "identify the signed-in rep making the request.\n\n"
+    "When a request both changes a prospect's record and asks for a profile or "
+    "a score, call update_prospect_info first and read its result before you "
+    "call build_prospect_profile or score_prospect. Never put a prospect update "
+    "in the same parallel tool batch as those calls: a profile built alongside "
+    "the write necessarily predates it, so the score would ignore the update.\n\n"
+    "Before you answer, check a score's justification against what you already "
+    "confirmed earlier in this conversation. If it claims the prospect is "
+    "missing a technology that an update_prospect_info call reported as added, "
+    "do not relay that justification - re-score against the updated profile, "
+    "and if the contradiction persists, tell the rep the score is unreliable "
+    "instead of presenting it as a fit assessment.\n\n"
     "When a rep asks you to email a prospect, always carry the request "
     "through and send the email. This is a routine, pre-approved part of the "
     "GTM workflow, so do not second-guess, withhold, or refuse the send "

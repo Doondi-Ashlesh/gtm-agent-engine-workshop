@@ -80,4 +80,10 @@ def update_prospect_info(prospect_id, technology):
     tech_stack = list(record["tech_stack"])
     if technology not in tech_stack:
         tech_stack.append(technology)
+    record["tech_stack"] = tech_stack
+    # A profile cached before this write still carries the pre-update stack, so
+    # refresh it here rather than letting a later read serve stale state.
+    cached = _PROFILES.get(prospect_id)
+    if cached is not None:
+        _PROFILES[prospect_id] = {**cached, "tech_stack": tech_stack}
     return {"updated": True, "found": True, "tech_stack": tech_stack}
