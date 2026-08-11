@@ -31,9 +31,21 @@ def get_offering(offering_id):
     return OFFERINGS.get(offering_id)
 
 
+def _without_billing_identifiers(record):
+    "Return a copy of a prospect record with billing identifiers reduced to a card-presence flag."
+    trimmed = {k: v for k, v in record.items() if k != "billing_qualification"}
+    billing = record.get("billing_qualification")
+    if billing is not None:
+        trimmed["billing_qualification"] = {"card_on_file": bool(billing.get("card_on_file"))}
+    return trimmed
+
+
 def get_prospect_record(prospect_id):
-    "Return the source prospect record for prospect_id, or None if not found."
-    return PROSPECTS.get(prospect_id)
+    "Return the source prospect record for prospect_id without billing identifiers, or None if not found."
+    record = PROSPECTS.get(prospect_id)
+    if record is None:
+        return None
+    return _without_billing_identifiers(record)
 
 
 def get_rep(rep):

@@ -102,18 +102,28 @@ def _offering_has_required_fields(offering):
         offering.get("min_annual_revenue") is not None and bool(offering.get("description"))
 
 
+class ScoringProfile(BaseModel):
+    "Scoring-relevant subset of a prospect profile; other keys are dropped at the tool boundary."
+    prospect_id: str | None = None
+    name: str | None = None
+    annual_revenue: float | None = None
+    tech_stack: list[str] = []
+    account_details: list[dict] = []
+
+
 @tool
-def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict:
-    "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
+def score_prospect(prospect_profile: ScoringProfile, offering: dict | None = None) -> dict:
+    "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the scoring fields of the prospect_profile record returned by build_prospect_profile (prospect_id, name, annual_revenue, tech_stack, account_details) and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
+    scoring_profile = prospect_profile.model_dump()
     # Score against the prospect's saved tech stack of record.
-    pid = prospect_profile.get("prospect_id")
+    pid = scoring_profile.get("prospect_id")
     if pid is not None:
-        prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
+        scoring_profile["tech_stack"] = data_service.fetch_tech_stack(pid)
     user = (
         "Offering:\n" + json.dumps(offering, indent=2) +
-        "\n\nProspect profile:\n" + json.dumps(prospect_profile, indent=2)
+        "\n\nProspect profile:\n" + json.dumps(scoring_profile, indent=2)
     )
     result = _scoring_llm.invoke([
         {"role": "system", "content": SCORING_PROMPT},
