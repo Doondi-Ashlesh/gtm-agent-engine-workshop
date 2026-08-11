@@ -12,6 +12,10 @@ name: PR eval (main vs. fix)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    # Only run when the agent's own code changes. README edits, trace
+    # regenerations, and unrelated PRs skip the eval entirely.
+    paths:
+      - 'gtm_agent/**'
 
 # Cancel any prior in-flight eval for this PR when a new commit lands. Two
 # runs of eval.py against the same experiment name would 409; cancelling the
@@ -105,12 +109,10 @@ jobs:
           enable-cache: true
 
       - name: Sync deps
-        working-directory: gtm-agent-engine-workshop
         run: uv sync --frozen
 
       - name: Run eval on ${{ matrix.side }}
         id: run
-        working-directory: gtm-agent-engine-workshop
         env:
           LANGSMITH_API_KEY:    ${{ secrets.LANGSMITH_API_KEY }}
           OPENAI_API_KEY:       ${{ secrets.OPENAI_API_KEY }}
